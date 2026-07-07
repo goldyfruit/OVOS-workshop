@@ -47,6 +47,20 @@ def test_fallback_ack_echoes_context_request_id():
     assert emitted.context["fallback_request_id"] == "req-context"
 
 
+def test_fallback_ack_preserves_empty_data_request_id():
+    skill = _make_skill()
+
+    skill._handle_fallback_ack(Message(
+        "ovos.skills.fallback.ping",
+        {"fallback_request_id": ""},
+        {"fallback_request_id": "ctx-req"},
+    ))
+
+    emitted = skill.bus.emit.call_args[0][0]
+    assert emitted.data["fallback_request_id"] == ""
+    assert emitted.context["fallback_request_id"] == ""
+
+
 def test_fallback_ack_keeps_legacy_shape_without_request_id():
     skill = _make_skill()
 

@@ -111,15 +111,16 @@ class FallbackSkill(OVOSSkill):
         Inform skills service we can handle fallbacks.
         """
         request_id = (
-            message.data.get("fallback_request_id")
-            or message.context.get("fallback_request_id")
+            message.data["fallback_request_id"]
+            if "fallback_request_id" in message.data
+            else message.context.get("fallback_request_id")
         )
         data = {
             "skill_id": self.skill_id,
             "can_handle": self.can_answer(message),
         }
         context = {"skill_id": self.skill_id}
-        if request_id:
+        if request_id is not None:
             data["fallback_request_id"] = request_id
             context["fallback_request_id"] = request_id
         self.bus.emit(message.reply("ovos.skills.fallback.pong",
