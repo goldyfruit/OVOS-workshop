@@ -36,7 +36,7 @@ from ovos_bus_client.apis.ocp import OCPInterface
 from ovos_bus_client.message import Message, dig_for_message
 from ovos_bus_client.session import SessionManager, Session
 from ovos_bus_client.util import get_message_lang
-from ovos_spec_tools import SpecMessage
+from ovos_spec_tools import SpecMessage, standardize_lang as standardize_lang_tag
 from ovos_config.config import Configuration
 from ovos_config.locations import get_xdg_cache_save_path
 from ovos_config.locations import get_xdg_config_save_path
@@ -51,7 +51,6 @@ from ovos_utils.events import EventContainer, get_handler_name, create_wrapper
 from ovos_utils.file_utils import FileWatcher
 from ovos_utils.gui import get_ui_directories
 from ovos_utils.json_helper import merge_dict
-from ovos_utils.lang import standardize_lang_tag
 from ovos_utils.log import LOG
 from ovos_utils.process_utils import ProcessStatus, StatusCallbackMap, RuntimeRequirements
 from ovos_utils.skills import get_non_properties
@@ -1325,6 +1324,14 @@ class OVOSSkill:
         if handler:
             self.add_event(name, handler, 'mycroft.skill.handler',
                            activation=True, is_intent=True)
+            # INTENT-4 pipelines dispatch the canonical suffix-less identity,
+            # while older pipelines still dispatch the legacy ``.intent``
+            # identity. Bind both during the migration window. This backports
+            # OpenVoiceOS/ovos-workshop#497 to the supported 8.3 runtime line.
+            canonical = name[:-len('.intent')] if name.endswith('.intent') else name
+            if canonical != name:
+                self.add_event(canonical, handler, 'mycroft.skill.handler',
+                               activation=True, is_intent=True)
 
     def register_entity_file(self, entity_file: str):
         """
@@ -2293,6 +2300,10 @@ class OVOSSkill:
             self.log.info('Disabling intent ' + intent_name)
             name = f'{self.skill_id}:{intent_name}'
             self.intent_service.detach_intent(name)
+            self.remove_event(name)
+            canonical = name[:-len('.intent')] if name.endswith('.intent') else name
+            if canonical != name:
+                self.remove_event(canonical)
 
             langs = [self.core_lang] + self.secondary_langs
             for lang in langs:
@@ -2438,7 +2449,6 @@ class SkillGUI(GUIInterface):
         ui_directories = get_ui_directories(skill.root_dir)
         GUIInterface.__init__(self, skill_id=skill_id, bus=bus, config=config,
                               ui_directories=ui_directories)
-
 
 
 

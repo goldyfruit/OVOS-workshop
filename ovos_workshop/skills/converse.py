@@ -6,7 +6,7 @@ from langcodes import closest_match
 from ovos_bus_client.message import Message
 from ovos_bus_client.message import dig_for_message
 from ovos_config.config import Configuration
-from ovos_utils.lang import standardize_lang_tag
+from ovos_spec_tools import standardize_lang as standardize_lang_tag
 from ovos_utils.log import LOG
 from ovos_utils.skills import get_non_properties
 from padacioso import IntentContainer

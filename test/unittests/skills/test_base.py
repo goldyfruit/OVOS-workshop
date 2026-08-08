@@ -351,6 +351,57 @@ class TestOVOSSkill(unittest.TestCase):
         skill.intent_service.register_padatious_intent.assert_any_call(
             f"{skill.skill_id}:time.intent", uk_intent_file, "uk-UA", string_blacklist=[])
 
+    def test_register_intent_file_binds_canonical_and_legacy_events(self):
+        skill = OVOSSkill(bus=FakeBus(), skill_id=self.skill_id)
+        skill._lang_resources = dict()
+        skill.intent_service = Mock()
+        skill.res_dir = join(dirname(__file__), "test_locale")
+        skill.config_core["lang"] = "en-US"
+        skill.config_core["secondary_langs"] = []
+
+        handler = Mock(__name__="test")
+        skill.register_intent_file("time.intent", handler)
+
+        event_names = [name for name, _ in skill.events]
+        self.assertIn(f"{skill.skill_id}:time.intent", event_names)
+        self.assertIn(f"{skill.skill_id}:time", event_names)
+
+    def test_register_intent_file_canonical_topic_fires_handler(self):
+        from ovos_bus_client.message import Message
+
+        bus = FakeBus()
+        skill = OVOSSkill(bus=bus, skill_id=self.skill_id)
+        skill._lang_resources = dict()
+        skill.intent_service = Mock()
+        skill.res_dir = join(dirname(__file__), "test_locale")
+        skill.config_core["lang"] = "en-US"
+        skill.config_core["secondary_langs"] = []
+        called = Event()
+
+        def handler(_message):
+            called.set()
+
+        skill.register_intent_file("time.intent", handler)
+        bus.emit(Message(f"{skill.skill_id}:time", {}, {}))
+
+        self.assertTrue(called.wait(2))
+
+    def test_disable_intent_removes_canonical_and_legacy_events(self):
+        skill = OVOSSkill(bus=FakeBus(), skill_id=self.skill_id)
+        skill._lang_resources = dict()
+        skill.intent_service = Mock()
+        skill.intent_service.__contains__ = Mock(return_value=True)
+        skill.res_dir = join(dirname(__file__), "test_locale")
+        skill.config_core["lang"] = "en-US"
+        skill.config_core["secondary_langs"] = []
+        skill.register_intent_file("time.intent", Mock(__name__="test"))
+
+        skill.disable_intent("time.intent")
+
+        event_names = [name for name, _ in skill.events]
+        self.assertNotIn(f"{skill.skill_id}:time.intent", event_names)
+        self.assertNotIn(f"{skill.skill_id}:time", event_names)
+
     def test_register_entity_file(self):
         skill = OVOSSkill(bus=self.bus, skill_id=self.skill_id)
         skill._lang_resources = dict()
@@ -544,4 +595,3 @@ class TestSkillGui(unittest.TestCase):
         config_core = {"gui": {"test": True,
                                "legacy": False}}
         root_dir = join(dirname(__file__), "test_gui")
-

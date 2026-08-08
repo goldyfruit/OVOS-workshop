@@ -25,7 +25,7 @@ from typing import List, Optional, Tuple, Dict, Any
 from langcodes import tag_distance
 from ovos_config.locations import get_xdg_data_save_path
 from ovos_utils import flatten_list
-from ovos_utils.bracket_expansion import expand_template
+from ovos_spec_tools import expand as expand_template
 from ovos_utils.dialog import MustacheDialogRenderer, load_dialogs
 from ovos_utils.log import LOG
 

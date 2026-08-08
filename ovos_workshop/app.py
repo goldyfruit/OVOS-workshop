@@ -2,7 +2,7 @@ from os.path import isdir, join
 from typing import Optional
 from ovos_config.locations import get_xdg_config_save_path
 from ovos_bus_client.util import get_mycroft_bus
-from ovos_utils.lang import standardize_lang_tag
+from ovos_spec_tools import standardize_lang as standardize_lang_tag
 from ovos_bus_client.apis.gui import GUIInterface
 from ovos_bus_client.client.client import MessageBusClient
 from ovos_workshop.resource_files import locate_lang_directories
