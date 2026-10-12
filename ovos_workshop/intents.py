@@ -170,7 +170,7 @@ class _AdaptIntentApi:
             self._send_legacy_register_vocab(msg, vocab_type, entity, aliases, lang)
         else:
             self._pending_vocab.setdefault(key, []).append(
-                (msg, vocab_type, entity, aliases, lang))
+                (msg, vocab_type, entity, list(aliases) if aliases else [], lang))
 
     def _flush_legacy_vocab(self, intent_parser: object) -> None:
         """Send the queued vocabulary an adapt intent is about to reference."""
