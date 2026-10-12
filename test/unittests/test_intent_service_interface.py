@@ -36,12 +36,19 @@ class MockEmitter:
 
 class KeywordRegistrationTest(unittest.TestCase):
     def check_emitter(self, expected_message_data):
-        """Verify that the registration messages matches the expected."""
-        for msg_type in self.emitter.get_types():
-            self.assertEqual(msg_type, 'register_vocab')
+        """Verify that the registration messages matches the expected.
+
+        The legacy register_vocab waits for an adapt intent that names the
+        vocabulary, so nothing is sent until one is registered.
+        """
+        self.assertEqual(self.emitter.get_types(), [])
+        parser = IntentBuilder("use_it").require("test_intent").build()
+        self.intent_service.register_intent("use_it", parser)
+        vocab = [data for mtype, data
+                 in zip(self.emitter.get_types(), self.emitter.get_results())
+                 if mtype == 'register_vocab']
         self.assertEqual(
-            sorted(self.emitter.get_results(),
-                   key=lambda d: sorted(d.items())),
+            sorted(vocab, key=lambda d: sorted(d.items())),
             sorted(expected_message_data, key=lambda d: sorted(d.items())))
         self.emitter.reset()
 
@@ -49,7 +56,7 @@ class KeywordRegistrationTest(unittest.TestCase):
         self.emitter = MockEmitter()
 
     def test_register_keyword(self):
-        intent_service = IntentServiceInterface(self.emitter)
+        intent_service = self.intent_service = IntentServiceInterface(self.emitter)
         intent_service.register_adapt_keyword('test_intent', 'test', lang='en-US')
         entity_data = {'entity_value': 'test', 'entity_type': 'test_intent', 'lang': 'en-US'}
         compatibility_data = {'start': 'test', 'end': 'test_intent'}
@@ -58,7 +65,7 @@ class KeywordRegistrationTest(unittest.TestCase):
 
     def test_register_keyword_with_aliases(self):
         # TODO 22.02: Remove compatibility data
-        intent_service = IntentServiceInterface(self.emitter)
+        intent_service = self.intent_service = IntentServiceInterface(self.emitter)
         intent_service.register_adapt_keyword('test_intent', 'test',
                                               ['test2', 'test3'],
                                               lang='en-US')
@@ -92,7 +99,10 @@ class KeywordRegistrationTest(unittest.TestCase):
     def test_register_regex(self):
         intent_service = IntentServiceInterface(self.emitter)
         intent_service.register_adapt_regex('.*', lang="en-US")
-        self.check_emitter([{'regex': '.*', 'lang': 'en-US'}])
+        # a regex entity is sent at once: only keyword vocabulary waits for
+        # an intent that names it
+        self.assertEqual(self.emitter.get_types(), ['register_vocab'])
+        self.assertEqual(self.emitter.get_results(), [{'regex': '.*', 'lang': 'en-US'}])
 
 
 class KeywordIntentRegistrationTest(unittest.TestCase):

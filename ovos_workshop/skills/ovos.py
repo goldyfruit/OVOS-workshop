@@ -684,8 +684,7 @@ class OVOSSkill:
                         entity = line[0]
                         aliases = line[1:]
                         self.intent_service.register_keyword(
-                            vocab_type, entity, aliases, lang,
-                            defer_legacy=True)
+                            vocab_type, entity, aliases, lang)
 
     def load_regex_files(self, root_directory: Optional[str] = None) -> None:
         """ Load regex files found under the skill directory."""

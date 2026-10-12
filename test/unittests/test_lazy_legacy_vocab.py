@@ -19,18 +19,15 @@ class TestLazyLegacyVocab(unittest.TestCase):
         return [m for m in self.sent if m["type"] == topic]
 
     def test_deferred_vocab_is_not_sent_without_an_adapt_intent(self):
-        self.iface.register_keyword(self.sid + "Colour", "red", ["crimson"], "en-US",
-                                    defer_legacy=True)
+        self.iface.register_keyword(self.sid + "Colour", "red", ["crimson"], "en-US")
         self.assertEqual(self._topics("register_vocab"), [])
         # the samples are still known to the spec registration path
         self.assertEqual(self.iface._get_keyword_samples(self.sid + "Colour", "en-US"),
                          ["red", "crimson"])
 
     def test_adapt_intent_flushes_its_vocab_before_the_intent(self):
-        self.iface.register_keyword(self.sid + "Colour", "red", ["crimson"], "en-US",
-                                    defer_legacy=True)
-        self.iface.register_keyword(self.sid + "Unused", "nothing", None, "en-US",
-                                    defer_legacy=True)
+        self.iface.register_keyword(self.sid + "Colour", "red", ["crimson"], "en-US")
+        self.iface.register_keyword(self.sid + "Unused", "nothing", None, "en-US")
         parser = IntentBuilder("paint").require("Colour").build()
         munge_intent_parser(parser, "paint", "test.skill")
         self.iface.register_intent("paint", parser)
@@ -44,15 +41,20 @@ class TestLazyLegacyVocab(unittest.TestCase):
         parser = IntentBuilder("paint").require("Colour").build()
         munge_intent_parser(parser, "paint", "test.skill")
         self.iface.register_intent("paint", parser)
-        self.iface.register_keyword(self.sid + "Colour", "blue", None, "en-US",
-                                    defer_legacy=True)
+        self.iface.register_keyword(self.sid + "Colour", "blue", None, "en-US")
         self.assertEqual([v["data"]["entity_value"] for v in self._topics("register_vocab")],
                          ["blue"])
 
-    def test_explicit_registration_is_not_deferred(self):
-        self.iface.register_keyword(self.sid + "Colour", "red", None, "en-US")
-        self.assertEqual(len(self._topics("register_vocab")), 1)
-
+    def test_aliases_and_languages_flush_together(self):
+        self.iface.register_keyword(self.sid + "Colour", "red", ["crimson"], "en-US")
+        self.iface.register_keyword(self.sid + "Colour", "rouge", None, "fr-FR")
+        self.assertEqual(self._topics("register_vocab"), [])
+        parser = IntentBuilder("paint").require("Colour").build()
+        munge_intent_parser(parser, "paint", "test.skill")
+        self.iface.register_intent("paint", parser)
+        self.assertEqual(sorted((v["data"]["entity_value"], v["data"]["lang"])
+                                for v in self._topics("register_vocab")),
+                         [("crimson", "en-US"), ("red", "en-US"), ("rouge", "fr-FR")])
 
 if __name__ == "__main__":
     unittest.main()

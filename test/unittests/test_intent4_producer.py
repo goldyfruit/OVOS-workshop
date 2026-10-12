@@ -492,6 +492,9 @@ class LegacyVocabProducerIdentityTest(unittest.TestCase):
             self.iface.register_adapt_keyword("setKW", "set",
                                               aliases=["change"],
                                               lang="en-US")
+            # the legacy vocab goes out when an adapt intent names it
+            parser = IntentBuilder("set_it").require("setKW").build()
+            self.iface.register_adapt_intent("set_it", parser)
         legacy = self.bus.of_type("register_vocab")
         self.assertEqual(len(legacy), 2)  # entity + one alias
         for _, context in legacy:
