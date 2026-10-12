@@ -880,8 +880,29 @@ class SkillResources:
         vocabulary of that name. User overrides take precedence over the skill's
         own resources, which take precedence over workshop-shipped resources.
         """
-        vocabularies: Dict[str, List[str]] = {}
+        # Called for every .intent and .blacklist file the skill loads, and
+        # each call walked the vocabulary tree and read and expanded every
+        # .voc in it again. Package directories do not change while
+        # installed, so the map is kept per directory identity; a user
+        # override directory (editable at runtime) is never cached.
         vocab_type = self.types.vocabulary
+        memo_key = None
+        if not vocab_type.user_directory:
+            memo_key = tuple((str(base), _dir_identity(base))
+                             for base in (vocab_type.base_directory,
+                                          vocab_type.workshop_directory)
+                             if base)
+            memo = getattr(self, "_vocabularies_memo", None)
+            if memo is not None and memo[0] == memo_key:
+                return {name: list(members) for name, members in memo[1].items()}
+        vocabularies = self._read_locale_vocabularies(vocab_type)
+        if memo_key is not None:
+            self._vocabularies_memo = (
+                memo_key, {name: list(members) for name, members in vocabularies.items()})
+        return vocabularies
+
+    def _read_locale_vocabularies(self, vocab_type) -> Dict[str, List[str]]:
+        vocabularies: Dict[str, List[str]] = {}
         for base in (vocab_type.user_directory,
                      vocab_type.base_directory,
                      vocab_type.workshop_directory):

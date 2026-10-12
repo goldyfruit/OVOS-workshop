@@ -67,3 +67,35 @@ class TestResourceLookupCache(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLocaleVocabulariesMemo(unittest.TestCase):
+    def setUp(self):
+        from ovos_workshop.resource_files import SkillResources
+        self.tmp = tempfile.TemporaryDirectory()
+        self.skill = Path(self.tmp.name)
+        _touch(self.skill / "locale" / "en-US" / "vocab" / "colour.voc", "Red\nblue\n")
+        _touch(self.skill / "locale" / "en-US" / "intents" / "paint.intent", "paint it <colour>\n")
+        resource_files._subdir_cache.clear()
+        resource_files._file_index_cache.clear()
+        self.resources = SkillResources(str(self.skill), "en-US", skill_id="test.skill")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_read_once_and_copied(self):
+        first = self.resources._locale_vocabularies()
+        self.assertEqual(first["colour"], ["red", "blue"])  # workshop's own .voc ride along
+        expected = {name: list(members) for name, members in first.items()}
+        first["colour"].append("mutated")
+        with mock.patch.object(resource_files, "walk",
+                               side_effect=AssertionError("walked again")):
+            second = self.resources._locale_vocabularies()
+        self.assertEqual(second, expected)
+
+    def test_user_override_directory_is_not_cached(self):
+        self.resources._locale_vocabularies()
+        self.resources.types.vocabulary.user_directory = self.skill / "locale" / "en-US"
+        with mock.patch.object(resource_files, "walk", wraps=resource_files.walk) as spy:
+            self.resources._locale_vocabularies()
+        self.assertTrue(spy.called)
