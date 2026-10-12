@@ -99,3 +99,49 @@ class TestLocaleVocabulariesMemo(unittest.TestCase):
         with mock.patch.object(resource_files, "walk", wraps=resource_files.walk) as spy:
             self.resources._locale_vocabularies()
         self.assertTrue(spy.called)
+
+
+class TestCachesSeeChangesDeepInTheTree(unittest.TestCase):
+    """A cache validated by the root's identity alone would miss these."""
+
+    def setUp(self):
+        from ovos_workshop.resource_files import SkillResources
+        self.tmp = tempfile.TemporaryDirectory()
+        self.skill = Path(self.tmp.name)
+        _touch(self.skill / "locale" / "en-US" / "vocab" / "colour.voc", "red\n")
+        _touch(self.skill / "locale" / "en-US" / "intents" / "paint.intent", "paint it <colour>\n")
+        resource_files._subdir_cache.clear()
+        resource_files._file_index_cache.clear()
+        self.resources = SkillResources(str(self.skill), "en-US", skill_id="test.skill")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_file_added_in_a_subdirectory_is_found(self):
+        rt = ResourceType("intent", ".intent", "en-US")
+        rt.locate_base_directory(str(self.skill))
+        self.assertIsNone(resource_files.IntentFile(rt, "erase").file_path)
+        root_before = os.stat(self.skill / "locale" / "en-US").st_mtime_ns
+        time.sleep(0.01)
+        _touch(self.skill / "locale" / "en-US" / "intents" / "erase.intent", "erase it\n")
+        # the language directory itself did not change...
+        self.assertEqual(os.stat(self.skill / "locale" / "en-US").st_mtime_ns, root_before)
+        # ...but the subdirectory did, and the index notices
+        self.assertEqual(resource_files.IntentFile(rt, "erase").file_path,
+                         self.skill / "locale" / "en-US" / "intents" / "erase.intent")
+
+    def test_vocabulary_added_in_a_subdirectory_is_seen(self):
+        self.assertNotIn("size", self.resources._locale_vocabularies())
+        time.sleep(0.01)
+        _touch(self.skill / "locale" / "en-US" / "vocab" / "size.voc", "big\n")
+        self.assertEqual(self.resources._locale_vocabularies()["size"], ["big"])
+
+    def test_vocabulary_edited_in_place_is_reread(self):
+        self.assertEqual(self.resources._locale_vocabularies()["colour"], ["red"])
+        voc = self.skill / "locale" / "en-US" / "vocab" / "colour.voc"
+        dir_before = os.stat(voc.parent).st_mtime_ns
+        time.sleep(0.01)
+        with open(voc, "w") as f:  # same inode, same directory entry
+            f.write("red\ngreen\n")
+        self.assertEqual(os.stat(voc.parent).st_mtime_ns, dir_before)
+        self.assertEqual(self.resources._locale_vocabularies()["colour"], ["red", "green"])

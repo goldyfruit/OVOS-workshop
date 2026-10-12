@@ -116,7 +116,7 @@ def match_lang_directories(lang: str, base_dirs: List[Path]) -> List[Path]:
 # new mtime), so both are memoized on (path, inode, mtime).
 _DIR_CACHE_MAX = 4096
 _subdir_cache: Dict[str, Tuple[Tuple[int, int], Tuple[str, ...]]] = {}
-_file_index_cache: Dict[str, Tuple[Tuple[int, int], Dict[str, Path]]] = {}
+_file_index_cache: Dict[str, Tuple[tuple, Dict[str, Path]]] = {}
 
 
 def _dir_identity(directory) -> Optional[Tuple[int, int]]:
@@ -155,26 +155,54 @@ def _lang_dir_distance(lang: str, name: str) -> Optional[float]:
     return lang_distance(lang, name)
 
 
+def _tree_still_matches(signature) -> bool:
+    """True when every directory and file recorded in `signature` still has
+    the identity it had when the cached result was built.
+
+    A directory's mtime moves when an entry is added, removed or renamed in
+    it -- but only in it, not in its subdirectories -- so a recursive cache
+    records every directory it walked, and every file whose content it used.
+    """
+    for kind, path, identity in signature:
+        try:
+            st = os.stat(path)
+        except OSError:
+            return False
+        if kind == "d":
+            current = (st.st_ino, st.st_mtime_ns)
+        else:
+            current = (st.st_ino, st.st_mtime_ns, st.st_size)
+        if current != identity:
+            return False
+    return True
+
+
 def _walk_file_index(directory) -> Dict[str, Path]:
     """file name -> path for every file under `directory`, memoized.
 
     Reproduces what ResourceFile._locate's walk returned: when several
     subdirectories hold the same file name, the one the walk reaches last.
+    The cached index is reused only while every directory the walk visited
+    is unchanged, so a file added anywhere in the tree is seen.
     """
     key = str(directory)
-    identity = _dir_identity(key)
-    if identity is None:
-        return {}
     cached = _file_index_cache.get(key)
-    if cached is not None and cached[0] == identity:
+    if cached is not None and _tree_still_matches(cached[0]):
         return cached[1]
     index: Dict[str, Path] = {}
+    signature = []
     for root, _, file_names in walk(key):
+        identity = _dir_identity(root)
+        if identity is None:
+            continue
+        signature.append(("d", root, identity))
         for file_name in file_names:
             index[file_name] = Path(root, file_name)
+    if not signature:
+        return {}
     if len(_file_index_cache) >= _DIR_CACHE_MAX:
         _file_index_cache.clear()
-    _file_index_cache[key] = (identity, index)
+    _file_index_cache[key] = (tuple(signature), index)
     return index
 
 
@@ -882,26 +910,31 @@ class SkillResources:
         """
         # Called for every .intent and .blacklist file the skill loads, and
         # each call walked the vocabulary tree and read and expanded every
-        # .voc in it again. Package directories do not change while
-        # installed, so the map is kept per directory identity; a user
-        # override directory (editable at runtime) is never cached.
+        # .voc in it again. The map is reused while every directory walked
+        # and every .voc read still has the identity it had (one stat each,
+        # no reads); a user override directory is never cached.
         vocab_type = self.types.vocabulary
-        memo_key = None
-        if not vocab_type.user_directory:
-            memo_key = tuple((str(base), _dir_identity(base))
-                             for base in (vocab_type.base_directory,
-                                          vocab_type.workshop_directory)
-                             if base)
+        cacheable = not vocab_type.user_directory
+        if cacheable:
             memo = getattr(self, "_vocabularies_memo", None)
-            if memo is not None and memo[0] == memo_key:
-                return {name: list(members) for name, members in memo[1].items()}
-        vocabularies = self._read_locale_vocabularies(vocab_type)
-        if memo_key is not None:
+            if memo is not None and memo[0] == (vocab_type.base_directory,
+                                                vocab_type.workshop_directory) \
+                    and _tree_still_matches(memo[1]):
+                return {name: list(members) for name, members in memo[2].items()}
+        signature: list = []
+        vocabularies = self._read_locale_vocabularies(vocab_type, signature)
+        if cacheable:
             self._vocabularies_memo = (
-                memo_key, {name: list(members) for name, members in vocabularies.items()})
+                (vocab_type.base_directory, vocab_type.workshop_directory),
+                tuple(signature),
+                {name: list(members) for name, members in vocabularies.items()})
         return vocabularies
 
-    def _read_locale_vocabularies(self, vocab_type) -> Dict[str, List[str]]:
+    def _read_locale_vocabularies(self, vocab_type,
+                                  signature: Optional[list] = None
+                                  ) -> Dict[str, List[str]]:
+        """Read every .voc in the vocabulary tree; when `signature` is given,
+        append the identity of each directory walked and each file read."""
         vocabularies: Dict[str, List[str]] = {}
         for base in (vocab_type.user_directory,
                      vocab_type.base_directory,
@@ -909,6 +942,10 @@ class SkillResources:
             if not base:
                 continue
             for directory, _, files in walk(str(base)):
+                if signature is not None:
+                    identity = _dir_identity(directory)
+                    if identity is not None:
+                        signature.append(("d", directory, identity))
                 for file_name in files:
                     if not file_name.endswith(".voc"):
                         continue
@@ -916,7 +953,15 @@ class SkillResources:
                     if name in vocabularies:
                         continue
                     members: List[str] = []
-                    with open(Path(directory, file_name)) as voc_file:
+                    voc_path = Path(directory, file_name)
+                    if signature is not None:
+                        try:
+                            st = os.stat(voc_path)
+                            signature.append(("f", str(voc_path),
+                                              (st.st_ino, st.st_mtime_ns, st.st_size)))
+                        except OSError:
+                            pass
+                    with open(voc_path) as voc_file:
                         for line in (ln.strip().lower() for ln in voc_file):
                             if line and not line.startswith("#"):
                                 # a .voc line MAY hold comma/parenthesis
