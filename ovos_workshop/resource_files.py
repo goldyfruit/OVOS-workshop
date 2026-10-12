@@ -16,6 +16,7 @@
 import abc
 import json
 import re
+import time
 from collections import namedtuple
 import os
 from functools import lru_cache
@@ -116,7 +117,7 @@ def match_lang_directories(lang: str, base_dirs: List[Path]) -> List[Path]:
 # new mtime), so both are memoized on (path, inode, mtime).
 _DIR_CACHE_MAX = 4096
 _subdir_cache: Dict[str, Tuple[Tuple[int, int], Tuple[str, ...]]] = {}
-_file_index_cache: Dict[str, Tuple[tuple, Dict[str, Path]]] = {}
+_file_index_cache: Dict[str, Tuple[tuple, Dict[str, Path], List[float]]] = {}
 
 
 def _dir_identity(directory) -> Optional[Tuple[int, int]]:
@@ -177,6 +178,28 @@ def _tree_still_matches(signature) -> bool:
     return True
 
 
+#: A cached lookup whose tree was found unchanged this recently is reused
+#: without stat'ing the tree again. Loading one skill resolves dozens of
+#: resource files per language, and each lookup re-stat'ed every directory and
+#: every .voc the cached result was built from: about a quarter of a skill's
+#: load time on a hub serving 11 languages, more where the package lives on a
+#: network volume. A file added to an installed package is still seen, at most
+#: this many seconds later.
+_REVALIDATE_AFTER_S = 2.0
+
+
+def _still_fresh(signature, checked: List[float]) -> bool:
+    """`_tree_still_matches`, answered from the last check while it is
+    recent. `checked` holds the monotonic time of that check and is updated."""
+    now = time.monotonic()
+    if now - checked[0] < _REVALIDATE_AFTER_S:
+        return True
+    if _tree_still_matches(signature):
+        checked[0] = now
+        return True
+    return False
+
+
 def _walk_file_index(directory) -> Dict[str, Path]:
     """file name -> path for every file under `directory`, memoized.
 
@@ -187,7 +210,7 @@ def _walk_file_index(directory) -> Dict[str, Path]:
     """
     key = str(directory)
     cached = _file_index_cache.get(key)
-    if cached is not None and _tree_still_matches(cached[0]):
+    if cached is not None and _still_fresh(cached[0], cached[2]):
         return cached[1]
     index: Dict[str, Path] = {}
     signature = []
@@ -202,7 +225,7 @@ def _walk_file_index(directory) -> Dict[str, Path]:
         return {}
     if len(_file_index_cache) >= _DIR_CACHE_MAX:
         _file_index_cache.clear()
-    _file_index_cache[key] = (tuple(signature), index)
+    _file_index_cache[key] = (tuple(signature), index, [time.monotonic()])
     return index
 
 
@@ -919,7 +942,7 @@ class SkillResources:
             memo = getattr(self, "_vocabularies_memo", None)
             if memo is not None and memo[0] == (vocab_type.base_directory,
                                                 vocab_type.workshop_directory) \
-                    and _tree_still_matches(memo[1]):
+                    and _still_fresh(memo[1], memo[3]):
                 return {name: list(members) for name, members in memo[2].items()}
         signature: list = []
         vocabularies = self._read_locale_vocabularies(vocab_type, signature)
@@ -927,7 +950,8 @@ class SkillResources:
             self._vocabularies_memo = (
                 (vocab_type.base_directory, vocab_type.workshop_directory),
                 tuple(signature),
-                {name: list(members) for name, members in vocabularies.items()})
+                {name: list(members) for name, members in vocabularies.items()},
+                [time.monotonic()])
         return vocabularies
 
     def _read_locale_vocabularies(self, vocab_type,
