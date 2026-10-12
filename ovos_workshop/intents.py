@@ -84,6 +84,11 @@ class _AdaptIntentApi:
 
     def __init__(self, iface: "IntentServiceInterface"):
         self._iface = iface
+        # Legacy ``register_vocab`` emits waiting for an adapt intent that
+        # names their vocabulary, keyed by unmunged vocab name, and the names
+        # an intent has referenced already (see emit_legacy_register_vocab).
+        self._pending_vocab: Dict[str, list] = {}
+        self._vocab_in_use: set = set()
 
     @property
     def bus(self):
@@ -149,6 +154,40 @@ class _AdaptIntentApi:
                                    entity: str,
                                    aliases: Optional[List[str]] = None,
                                    lang: str = None):
+        """Queue the legacy adapt ``register_vocab`` emit until an adapt
+        intent of this skill names the vocabulary.
+
+        Only the adapt engine reads the legacy topic, and only for the
+        vocabularies its intents require. A skill registers every .voc it
+        ships, in every language, one message per phrase and alias -- tens of
+        thousands on a multilingual runtime, most of them for skills with no
+        adapt intent at all, each one relayed to every bus client.
+        ``emit_legacy_register_intent`` flushes a vocabulary ahead of the
+        intent that names it; once named, later registrations go out at once.
+        """
+        key = self._iface._unmunge_vocab_name(vocab_type)
+        if key in self._vocab_in_use:
+            self._send_legacy_register_vocab(msg, vocab_type, entity, aliases, lang)
+        else:
+            self._pending_vocab.setdefault(key, []).append(
+                (msg, vocab_type, entity, list(aliases) if aliases else [], lang))
+
+    def _flush_legacy_vocab(self, intent_parser: object) -> None:
+        """Send the queued vocabulary an adapt intent is about to reference."""
+        referenced = [r[0] for r in intent_parser.requires] + \
+            [o[0] for o in intent_parser.optional] + \
+            [n for group in intent_parser.at_least_one for n in group] + \
+            list(intent_parser.excludes)
+        for vocab_type in referenced:
+            key = self._iface._unmunge_vocab_name(vocab_type)
+            self._vocab_in_use.add(key)
+            for queued in self._pending_vocab.pop(key, []):
+                self._send_legacy_register_vocab(*queued)
+
+    def _send_legacy_register_vocab(self, msg: Message, vocab_type: str,
+                                    entity: str,
+                                    aliases: Optional[List[str]] = None,
+                                    lang: str = None):
         """Emit the legacy adapt ``register_vocab`` topic (entity + aliases).
 
         `msg` is the caller's stamped copy, carrying this skill as the
@@ -183,6 +222,7 @@ class _AdaptIntentApi:
 
         TODO: drop once the adapt pipeline consumes ovos.intent.register.keyword (INTENT-4 §5) directly.
         """
+        self._flush_legacy_vocab(intent_parser)
         data = dict(intent_parser.__dict__)
         # OVOS-CONTEXT-1 §6/§6.1 gating declarations, riding as unknown-field
         # extensions per INTENT-4 §5.3. Merged onto a copy of the parser's
