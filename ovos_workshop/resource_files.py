@@ -17,6 +17,8 @@ import abc
 import json
 import re
 from collections import namedtuple
+import os
+from functools import lru_cache
 from os import walk
 from os.path import dirname
 from pathlib import Path
@@ -93,17 +95,87 @@ def match_lang_directories(lang: str, base_dirs: List[Path]) -> List[Path]:
     """
     candidates = []
     for directory in base_dirs:
-        if directory.exists():
-            for folder in directory.iterdir():
-                if folder.is_dir():
-                    # ovos_spec_tools owns the language-distance policy and
-                    # its threshold; a directory whose name is not a usable
-                    # match for `lang` scores beyond it and is skipped.
-                    if lang_matches(lang, folder.name):
-                        candidates.append((folder, lang_distance(lang, folder.name)))
+        for name in _subdirectory_names(directory):
+            # ovos_spec_tools owns the language-distance policy and its
+            # threshold; a directory whose name is not a usable match for
+            # `lang` scores beyond it and is skipped.
+            distance = _lang_dir_distance(lang, name)
+            if distance is not None:
+                candidates.append((Path(directory, name), distance))
     # sort by distance to target lang code
     candidates = sorted(candidates, key=lambda k: k[1])
     return [c[0] for c in candidates]
+
+
+# A skill resolves its resources once per (language, resource type) and once
+# per resource file, and a skill that ships dozens of locales paid for listing
+# and language-matching every one of them on each call: on a hub serving 11
+# languages that was ~65 directories x ~26 lookups x 11 languages per skill,
+# plus an os.walk per intent/vocab/dialog file. Package directories do not
+# change while they are installed, and a reinstall replaces them (new inode,
+# new mtime), so both are memoized on (path, inode, mtime).
+_DIR_CACHE_MAX = 4096
+_subdir_cache: Dict[str, Tuple[Tuple[int, int], Tuple[str, ...]]] = {}
+_file_index_cache: Dict[str, Tuple[Tuple[int, int], Dict[str, Path]]] = {}
+
+
+def _dir_identity(directory) -> Optional[Tuple[int, int]]:
+    try:
+        st = os.stat(directory)
+    except OSError:
+        return None
+    return st.st_ino, st.st_mtime_ns
+
+
+def _subdirectory_names(directory) -> Tuple[str, ...]:
+    """Names of the immediate subdirectories of `directory`, memoized."""
+    key = str(directory)
+    identity = _dir_identity(key)
+    if identity is None:
+        return ()
+    cached = _subdir_cache.get(key)
+    if cached is not None and cached[0] == identity:
+        return cached[1]
+    try:
+        with os.scandir(key) as entries:
+            names = tuple(sorted(e.name for e in entries if e.is_dir()))
+    except OSError:
+        return ()
+    if len(_subdir_cache) >= _DIR_CACHE_MAX:
+        _subdir_cache.clear()
+    _subdir_cache[key] = (identity, names)
+    return names
+
+
+@lru_cache(maxsize=8192)
+def _lang_dir_distance(lang: str, name: str) -> Optional[float]:
+    """lang_distance for a usable language directory name, else None."""
+    if not lang_matches(lang, name):
+        return None
+    return lang_distance(lang, name)
+
+
+def _walk_file_index(directory) -> Dict[str, Path]:
+    """file name -> path for every file under `directory`, memoized.
+
+    Reproduces what ResourceFile._locate's walk returned: when several
+    subdirectories hold the same file name, the one the walk reaches last.
+    """
+    key = str(directory)
+    identity = _dir_identity(key)
+    if identity is None:
+        return {}
+    cached = _file_index_cache.get(key)
+    if cached is not None and cached[0] == identity:
+        return cached[1]
+    index: Dict[str, Path] = {}
+    for root, _, file_names in walk(key):
+        for file_name in file_names:
+            index[file_name] = Path(root, file_name)
+    if len(_file_index_cache) >= _DIR_CACHE_MAX:
+        _file_index_cache.clear()
+    _file_index_cache[key] = (identity, index)
+    return index
 
 
 def _foreign_lang_dirs(directory: Path, root_dir: str,
@@ -347,19 +419,16 @@ class ResourceFile:
                 if file_name in file_names:
                     file_path = Path(directory, file_name)
 
-        # check the skill resources
-        if file_path is None:
-            walk_directory = str(self.resource_type.base_directory)
-            for directory, _, file_names in walk(walk_directory):
-                if file_name in file_names:
-                    file_path = Path(directory, file_name)
+        # check the skill resources (package data: indexed once per
+        # directory instead of walked once per resource file)
+        if file_path is None and self.resource_type.base_directory is not None:
+            file_path = _walk_file_index(
+                self.resource_type.base_directory).get(file_name)
 
         # check ovos-workshop resources
         if file_path is None and self.resource_type.workshop_directory is not None:
-            walk_directory = str(self.resource_type.workshop_directory)
-            for directory, _, file_names in walk(walk_directory):
-                if file_name in file_names:
-                    file_path = Path(directory, file_name)
+            file_path = _walk_file_index(
+                self.resource_type.workshop_directory).get(file_name)
 
         if file_path is None:
             LOG.debug(f"Could not find resource file {file_name} for lang: {self.resource_type.language}")
