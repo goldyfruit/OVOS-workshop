@@ -17,6 +17,8 @@ import abc
 import json
 import re
 from collections import namedtuple
+import os
+from functools import lru_cache
 from os import walk
 from os.path import dirname
 from pathlib import Path
@@ -93,17 +95,115 @@ def match_lang_directories(lang: str, base_dirs: List[Path]) -> List[Path]:
     """
     candidates = []
     for directory in base_dirs:
-        if directory.exists():
-            for folder in directory.iterdir():
-                if folder.is_dir():
-                    # ovos_spec_tools owns the language-distance policy and
-                    # its threshold; a directory whose name is not a usable
-                    # match for `lang` scores beyond it and is skipped.
-                    if lang_matches(lang, folder.name):
-                        candidates.append((folder, lang_distance(lang, folder.name)))
+        for name in _subdirectory_names(directory):
+            # ovos_spec_tools owns the language-distance policy and its
+            # threshold; a directory whose name is not a usable match for
+            # `lang` scores beyond it and is skipped.
+            distance = _lang_dir_distance(lang, name)
+            if distance is not None:
+                candidates.append((Path(directory, name), distance))
     # sort by distance to target lang code
     candidates = sorted(candidates, key=lambda k: k[1])
     return [c[0] for c in candidates]
+
+
+# A skill resolves its resources once per (language, resource type) and once
+# per resource file, and a skill that ships dozens of locales paid for listing
+# and language-matching every one of them on each call: on a hub serving 11
+# languages that was ~65 directories x ~26 lookups x 11 languages per skill,
+# plus an os.walk per intent/vocab/dialog file. Package directories do not
+# change while they are installed, and a reinstall replaces them (new inode,
+# new mtime), so both are memoized on (path, inode, mtime).
+_DIR_CACHE_MAX = 4096
+_subdir_cache: Dict[str, Tuple[Tuple[int, int], Tuple[str, ...]]] = {}
+_file_index_cache: Dict[str, Tuple[tuple, Dict[str, Path]]] = {}
+
+
+def _dir_identity(directory) -> Optional[Tuple[int, int]]:
+    try:
+        st = os.stat(directory)
+    except OSError:
+        return None
+    return st.st_ino, st.st_mtime_ns
+
+
+def _subdirectory_names(directory) -> Tuple[str, ...]:
+    """Names of the immediate subdirectories of `directory`, memoized."""
+    key = str(directory)
+    identity = _dir_identity(key)
+    if identity is None:
+        return ()
+    cached = _subdir_cache.get(key)
+    if cached is not None and cached[0] == identity:
+        return cached[1]
+    try:
+        with os.scandir(key) as entries:
+            names = tuple(sorted(e.name for e in entries if e.is_dir()))
+    except OSError:
+        return ()
+    if len(_subdir_cache) >= _DIR_CACHE_MAX:
+        _subdir_cache.clear()
+    _subdir_cache[key] = (identity, names)
+    return names
+
+
+@lru_cache(maxsize=8192)
+def _lang_dir_distance(lang: str, name: str) -> Optional[float]:
+    """lang_distance for a usable language directory name, else None."""
+    if not lang_matches(lang, name):
+        return None
+    return lang_distance(lang, name)
+
+
+def _tree_still_matches(signature) -> bool:
+    """True when every directory and file recorded in `signature` still has
+    the identity it had when the cached result was built.
+
+    A directory's mtime moves when an entry is added, removed or renamed in
+    it -- but only in it, not in its subdirectories -- so a recursive cache
+    records every directory it walked, and every file whose content it used.
+    """
+    for kind, path, identity in signature:
+        try:
+            st = os.stat(path)
+        except OSError:
+            return False
+        if kind == "d":
+            current = (st.st_ino, st.st_mtime_ns)
+        else:
+            current = (st.st_ino, st.st_mtime_ns, st.st_size)
+        if current != identity:
+            return False
+    return True
+
+
+def _walk_file_index(directory) -> Dict[str, Path]:
+    """file name -> path for every file under `directory`, memoized.
+
+    Reproduces what ResourceFile._locate's walk returned: when several
+    subdirectories hold the same file name, the one the walk reaches last.
+    The cached index is reused only while every directory the walk visited
+    is unchanged, so a file added anywhere in the tree is seen.
+    """
+    key = str(directory)
+    cached = _file_index_cache.get(key)
+    if cached is not None and _tree_still_matches(cached[0]):
+        return cached[1]
+    index: Dict[str, Path] = {}
+    signature = []
+    for root, _, file_names in walk(key):
+        identity = _dir_identity(root)
+        if identity is None:
+            continue
+        signature.append(("d", root, identity))
+        for file_name in file_names:
+            index[file_name] = Path(root, file_name)
+    if not signature:
+        return {}
+    if len(_file_index_cache) >= _DIR_CACHE_MAX:
+        _file_index_cache.clear()
+    _file_index_cache[key] = (tuple(signature), index)
+    return index
 
 
 def _foreign_lang_dirs(directory: Path, root_dir: str,
@@ -347,19 +447,16 @@ class ResourceFile:
                 if file_name in file_names:
                     file_path = Path(directory, file_name)
 
-        # check the skill resources
-        if file_path is None:
-            walk_directory = str(self.resource_type.base_directory)
-            for directory, _, file_names in walk(walk_directory):
-                if file_name in file_names:
-                    file_path = Path(directory, file_name)
+        # check the skill resources (package data: indexed once per
+        # directory instead of walked once per resource file)
+        if file_path is None and self.resource_type.base_directory is not None:
+            file_path = _walk_file_index(
+                self.resource_type.base_directory).get(file_name)
 
         # check ovos-workshop resources
         if file_path is None and self.resource_type.workshop_directory is not None:
-            walk_directory = str(self.resource_type.workshop_directory)
-            for directory, _, file_names in walk(walk_directory):
-                if file_name in file_names:
-                    file_path = Path(directory, file_name)
+            file_path = _walk_file_index(
+                self.resource_type.workshop_directory).get(file_name)
 
         if file_path is None:
             LOG.debug(f"Could not find resource file {file_name} for lang: {self.resource_type.language}")
@@ -811,14 +908,44 @@ class SkillResources:
         vocabulary of that name. User overrides take precedence over the skill's
         own resources, which take precedence over workshop-shipped resources.
         """
-        vocabularies: Dict[str, List[str]] = {}
+        # Called for every .intent and .blacklist file the skill loads, and
+        # each call walked the vocabulary tree and read and expanded every
+        # .voc in it again. The map is reused while every directory walked
+        # and every .voc read still has the identity it had (one stat each,
+        # no reads); a user override directory is never cached.
         vocab_type = self.types.vocabulary
+        cacheable = not vocab_type.user_directory
+        if cacheable:
+            memo = getattr(self, "_vocabularies_memo", None)
+            if memo is not None and memo[0] == (vocab_type.base_directory,
+                                                vocab_type.workshop_directory) \
+                    and _tree_still_matches(memo[1]):
+                return {name: list(members) for name, members in memo[2].items()}
+        signature: list = []
+        vocabularies = self._read_locale_vocabularies(vocab_type, signature)
+        if cacheable:
+            self._vocabularies_memo = (
+                (vocab_type.base_directory, vocab_type.workshop_directory),
+                tuple(signature),
+                {name: list(members) for name, members in vocabularies.items()})
+        return vocabularies
+
+    def _read_locale_vocabularies(self, vocab_type,
+                                  signature: Optional[list] = None
+                                  ) -> Dict[str, List[str]]:
+        """Read every .voc in the vocabulary tree; when `signature` is given,
+        append the identity of each directory walked and each file read."""
+        vocabularies: Dict[str, List[str]] = {}
         for base in (vocab_type.user_directory,
                      vocab_type.base_directory,
                      vocab_type.workshop_directory):
             if not base:
                 continue
             for directory, _, files in walk(str(base)):
+                if signature is not None:
+                    identity = _dir_identity(directory)
+                    if identity is not None:
+                        signature.append(("d", directory, identity))
                 for file_name in files:
                     if not file_name.endswith(".voc"):
                         continue
@@ -826,7 +953,15 @@ class SkillResources:
                     if name in vocabularies:
                         continue
                     members: List[str] = []
-                    with open(Path(directory, file_name)) as voc_file:
+                    voc_path = Path(directory, file_name)
+                    if signature is not None:
+                        try:
+                            st = os.stat(voc_path)
+                            signature.append(("f", str(voc_path),
+                                              (st.st_ino, st.st_mtime_ns, st.st_size)))
+                        except OSError:
+                            pass
+                    with open(voc_path) as voc_file:
                         for line in (ln.strip().lower() for ln in voc_file):
                             if line and not line.startswith("#"):
                                 # a .voc line MAY hold comma/parenthesis
