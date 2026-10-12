@@ -102,10 +102,14 @@ class TestLocaleVocabulariesMemo(unittest.TestCase):
 
 
 class TestCachesSeeChangesDeepInTheTree(unittest.TestCase):
-    """A cache validated by the root's identity alone would miss these."""
+    """A cache validated by the root's identity alone would miss these.
+    (Run with no revalidation window: each lookup checks the tree.)"""
 
     def setUp(self):
         from ovos_workshop.resource_files import SkillResources
+        window = mock.patch.object(resource_files, "_REVALIDATE_AFTER_S", 0)
+        window.start()
+        self.addCleanup(window.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.skill = Path(self.tmp.name)
         _touch(self.skill / "locale" / "en-US" / "vocab" / "colour.voc", "red\n")
@@ -145,3 +149,49 @@ class TestCachesSeeChangesDeepInTheTree(unittest.TestCase):
             f.write("red\ngreen\n")
         self.assertEqual(os.stat(voc.parent).st_mtime_ns, dir_before)
         self.assertEqual(self.resources._locale_vocabularies()["colour"], ["red", "green"])
+
+
+class TestRevalidationWindow(unittest.TestCase):
+    """A lookup repeated within the window reuses the cached result without
+    stat'ing its tree; once the window has passed, a change is seen."""
+
+    def setUp(self):
+        from ovos_workshop.resource_files import SkillResources
+        self.tmp = tempfile.TemporaryDirectory()
+        self.skill = Path(self.tmp.name)
+        _touch(self.skill / "locale" / "en-US" / "vocab" / "colour.voc", "red\n")
+        _touch(self.skill / "locale" / "en-US" / "intents" / "paint.intent", "paint it <colour>\n")
+        resource_files._subdir_cache.clear()
+        resource_files._file_index_cache.clear()
+        self.resources = SkillResources(str(self.skill), "en-US", skill_id="test.skill")
+        self.now = [1000.0]
+        clock = mock.patch.object(resource_files.time, "monotonic", lambda: self.now[0])
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_no_tree_check_within_the_window(self):
+        rt = ResourceType("intent", ".intent", "en-US")
+        rt.locate_base_directory(str(self.skill))
+        resource_files.IntentFile(rt, "paint").file_path
+        self.resources._locale_vocabularies()
+        self.now[0] += resource_files._REVALIDATE_AFTER_S / 2
+        with mock.patch.object(resource_files, "_tree_still_matches",
+                               side_effect=AssertionError("tree re-stat'ed")):
+            self.assertIsNotNone(resource_files.IntentFile(rt, "paint").file_path)
+            self.assertEqual(self.resources._locale_vocabularies()["colour"], ["red"])
+
+    def test_change_seen_once_the_window_has_passed(self):
+        self.assertNotIn("size", self.resources._locale_vocabularies())
+        time.sleep(0.01)
+        _touch(self.skill / "locale" / "en-US" / "vocab" / "size.voc", "big\n")
+        self.now[0] += resource_files._REVALIDATE_AFTER_S + 0.1
+        self.assertEqual(self.resources._locale_vocabularies()["size"], ["big"])
+        rt = ResourceType("intent", ".intent", "en-US")
+        rt.locate_base_directory(str(self.skill))
+        self.assertIsNone(resource_files.IntentFile(rt, "erase").file_path)
+        _touch(self.skill / "locale" / "en-US" / "intents" / "erase.intent", "erase it\n")
+        self.now[0] += resource_files._REVALIDATE_AFTER_S + 0.1
+        self.assertIsNotNone(resource_files.IntentFile(rt, "erase").file_path)

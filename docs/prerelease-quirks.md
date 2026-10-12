@@ -9,6 +9,16 @@ This file resets at the next stable release. At that point its contents
 become upgrade notes for the `8.0.0 -> next-stable` jump, and a new, empty
 quirks log starts.
 
+## 9.8.17a1 — resource caches re-check their tree at most every 2 seconds
+
+The directory listings, file indexes and locale vocabularies memoized in 9.8.6
+were revalidated on every lookup by stat'ing every directory walked and every
+`.voc` read. A skill resolves dozens of resource files per language, so on a
+hub serving 11 languages that was about a quarter of each skill's load time.
+A cached result whose tree was found unchanged less than 2 seconds ago is now
+reused without checking it again. A file added to or edited in an installed
+skill is still seen, at most 2 seconds later.
+
 ## 9.6.2a4 — `intent_files` decorator registrations now carry context gates
 
 A decorated handler's `intent_files` entries reach `register_intent_file`
