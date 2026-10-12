@@ -459,6 +459,11 @@ class IntentServiceInterface:
         self.detached_intents: List[tuple] = []
         self._iterator_lock = RLock()
         self._adapt_keyword_samples: dict = {}
+        # Legacy ``register_vocab`` emits waiting for an adapt intent that
+        # references their vocabulary, keyed by unmunged vocab name, and the
+        # names an intent has referenced already (see register_keyword).
+        self._pending_legacy_vocab: Dict[str, list] = {}
+        self._legacy_vocab_in_use: set = set()
         self._adapt = _AdaptIntentApi(self)
         self._padatious = _PadatiousIntentApi(self)
 
@@ -489,7 +494,7 @@ class IntentServiceInterface:
 
     def register_keyword(self, vocab_type: str, entity: str,
                          aliases: Optional[List[str]] = None,
-                         lang: str = None):
+                         lang: str = None, defer_legacy: bool = False):
         # OVOS-INTENT-4 §3.2: this skill is the producer of its own
         # registration. The dug message may belong to another component,
         # when a skill registers while handling someone else's message,
@@ -507,8 +512,33 @@ class IntentServiceInterface:
                 samples.append(value)
 
         # TODO: drop once _AdaptIntentApi.emit_legacy_register_vocab is removed.
-        self._adapt.emit_legacy_register_vocab(msg, vocab_type, entity,
-                                               aliases, lang)
+        # Only the adapt engine reads the legacy topic, and only for the
+        # vocabularies its intents require. Loading a skill registers every
+        # .voc it ships, in every language, one bus message per phrase and
+        # alias -- tens of thousands on a multilingual runtime, most of them
+        # for skills with no adapt intent at all, each one relayed to every
+        # bus client. So with `defer_legacy` (the bulk load_vocab_files path)
+        # the emit waits until an adapt intent of this skill names the
+        # vocabulary (register_intent flushes it, ahead of the intent
+        # itself), and goes out at once after that. An explicit registration
+        # is still sent straight away.
+        key = self._unmunge_vocab_name(vocab_type)
+        if not defer_legacy or key in self._legacy_vocab_in_use:
+            self._adapt.emit_legacy_register_vocab(msg, vocab_type, entity,
+                                                   aliases, lang)
+        else:
+            self._pending_legacy_vocab.setdefault(key, []).append(
+                (msg, vocab_type, entity, aliases, lang))
+
+    def _flush_legacy_vocab(self, vocab_types) -> None:
+        """Emit the queued legacy vocabulary an adapt intent is about to
+        reference, and send any later registration of it straight away."""
+        for vocab_type in vocab_types:
+            key = self._unmunge_vocab_name(vocab_type)
+            self._legacy_vocab_in_use.add(key)
+            for msg, vt, entity, aliases, lang in self._pending_legacy_vocab.pop(key, []):
+                self._adapt.emit_legacy_register_vocab(msg, vt, entity,
+                                                       aliases, lang)
 
     def _unmunge_vocab_name(self, vocab_type: str) -> str:
         prefix = _AdaptIntentApi.to_alnum(self.skill_id)
@@ -623,6 +653,11 @@ class IntentServiceInterface:
                 break
         if slot is not None and self.registered_intents[slot] == (name, intent_parser):
             return
+        referenced = [r[0] for r in intent_parser.requires] + \
+            [o[0] for o in intent_parser.optional] + \
+            [n for group in intent_parser.at_least_one for n in group] + \
+            list(intent_parser.excludes)
+        self._flush_legacy_vocab(referenced)
         self._adapt.emit_legacy_register_intent(msg, intent_parser,
                                                  requires_context=requires_context,
                                                  excludes_context=excludes_context)
