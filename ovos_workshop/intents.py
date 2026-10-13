@@ -172,22 +172,23 @@ class _AdaptIntentApi:
             self._pending_vocab.setdefault(key, []).append(
                 (msg, vocab_type, entity, list(aliases) if aliases else [], lang))
 
-    def _flush_legacy_vocab(self, intent_parser: object,
-                            carried_langs: Optional[Set[str]] = None) -> None:
+    def _flush_legacy_vocab(self, intent_parser: object) -> None:
         """Send the queued vocabulary an adapt intent is about to reference.
 
-        `carried_langs` are the languages this intent's
-        ``ovos.intent.register.keyword`` registration goes out in. That
-        payload lists every sample of every vocabulary the intent names, and
-        the adapt engine registers each one as it registers a legacy
-        ``register_vocab`` that has no alias. Such a queued entry is dropped
-        instead of sent a second time: a skill that names a few hundred
-        stations in eleven languages otherwise sends thousands of messages to
-        say what one registration per language already says. An entry with
-        aliases still goes out, because only the legacy topic carries
-        ``alias_of``.
+        The languages this intent's ``ovos.intent.register.keyword``
+        registration goes out in (``_spec_keyword_langs``, the only other
+        consumer of that computation) are carried here directly rather than
+        threaded in as an argument. That payload lists every sample of every
+        vocabulary the intent names, and the adapt engine registers each one
+        as it registers a legacy ``register_vocab`` that has no alias. Such a
+        queued entry is dropped instead of sent a second time: a skill that
+        names a few hundred stations in eleven languages otherwise sends
+        thousands of messages to say what one registration per language
+        already says. An entry with aliases still goes out, because only the
+        legacy topic carries ``alias_of``.
         """
-        carried_langs = carried_langs or set()
+        carried_langs = self._iface._spec_keyword_langs(intent_parser.name,
+                                                         intent_parser)
         referenced = [r[0] for r in intent_parser.requires] + \
             [o[0] for o in intent_parser.optional] + \
             [n for group in intent_parser.at_least_one for n in group] + \
@@ -234,16 +235,12 @@ class _AdaptIntentApi:
 
     def emit_legacy_register_intent(self, msg: Message, intent_parser: object,
                                     requires_context: Optional[List[ContextGate]] = None,
-                                    excludes_context: Optional[List[ContextGate]] = None,
-                                    carried_langs: Optional[Set[str]] = None):
+                                    excludes_context: Optional[List[ContextGate]] = None):
         """Emit the legacy adapt ``register_intent`` topic.
-
-        `carried_langs`: the languages the intent's INTENT-4 keyword
-        registration goes out in (see ``_flush_legacy_vocab``).
 
         TODO: drop once the adapt pipeline consumes ovos.intent.register.keyword (INTENT-4 §5) directly.
         """
-        self._flush_legacy_vocab(intent_parser, carried_langs)
+        self._flush_legacy_vocab(intent_parser)
         data = dict(intent_parser.__dict__)
         # OVOS-CONTEXT-1 §6/§6.1 gating declarations, riding as unknown-field
         # extensions per INTENT-4 §5.3. Merged onto a copy of the parser's
@@ -704,8 +701,7 @@ class IntentServiceInterface:
         self._adapt.emit_legacy_register_intent(
             msg, intent_parser,
             requires_context=requires_context,
-            excludes_context=excludes_context,
-            carried_langs=self._spec_keyword_langs(name, intent_parser))
+            excludes_context=excludes_context)
         self._emit_spec_keyword_intent(msg, name, intent_parser,
                                        requires_context=requires_context,
                                        excludes_context=excludes_context)
