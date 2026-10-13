@@ -3,7 +3,7 @@ import time
 from os.path import exists
 from pathlib import Path
 from threading import RLock
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 import re
 import warnings
 from ovos_bus_client.message import Message, dig_for_message
@@ -172,8 +172,22 @@ class _AdaptIntentApi:
             self._pending_vocab.setdefault(key, []).append(
                 (msg, vocab_type, entity, list(aliases) if aliases else [], lang))
 
-    def _flush_legacy_vocab(self, intent_parser: object) -> None:
-        """Send the queued vocabulary an adapt intent is about to reference."""
+    def _flush_legacy_vocab(self, intent_parser: object,
+                            carried_langs: Optional[Set[str]] = None) -> None:
+        """Send the queued vocabulary an adapt intent is about to reference.
+
+        `carried_langs` are the languages this intent's
+        ``ovos.intent.register.keyword`` registration goes out in. That
+        payload lists every sample of every vocabulary the intent names, and
+        the adapt engine registers each one as it registers a legacy
+        ``register_vocab`` that has no alias. Such a queued entry is dropped
+        instead of sent a second time: a skill that names a few hundred
+        stations in eleven languages otherwise sends thousands of messages to
+        say what one registration per language already says. An entry with
+        aliases still goes out, because only the legacy topic carries
+        ``alias_of``.
+        """
+        carried_langs = carried_langs or set()
         referenced = [r[0] for r in intent_parser.requires] + \
             [o[0] for o in intent_parser.optional] + \
             [n for group in intent_parser.at_least_one for n in group] + \
@@ -182,6 +196,9 @@ class _AdaptIntentApi:
             key = self._iface._unmunge_vocab_name(vocab_type)
             self._vocab_in_use.add(key)
             for queued in self._pending_vocab.pop(key, []):
+                _msg, _vocab_type, _entity, aliases, lang = queued
+                if lang in carried_langs and not aliases:
+                    continue
                 self._send_legacy_register_vocab(*queued)
 
     def _send_legacy_register_vocab(self, msg: Message, vocab_type: str,
@@ -217,12 +234,16 @@ class _AdaptIntentApi:
 
     def emit_legacy_register_intent(self, msg: Message, intent_parser: object,
                                     requires_context: Optional[List[ContextGate]] = None,
-                                    excludes_context: Optional[List[ContextGate]] = None):
+                                    excludes_context: Optional[List[ContextGate]] = None,
+                                    carried_langs: Optional[Set[str]] = None):
         """Emit the legacy adapt ``register_intent`` topic.
+
+        `carried_langs`: the languages the intent's INTENT-4 keyword
+        registration goes out in (see ``_flush_legacy_vocab``).
 
         TODO: drop once the adapt pipeline consumes ovos.intent.register.keyword (INTENT-4 §5) directly.
         """
-        self._flush_legacy_vocab(intent_parser)
+        self._flush_legacy_vocab(intent_parser, carried_langs)
         data = dict(intent_parser.__dict__)
         # OVOS-CONTEXT-1 §6/§6.1 gating declarations, riding as unknown-field
         # extensions per INTENT-4 §5.3. Merged onto a copy of the parser's
@@ -576,10 +597,11 @@ class IntentServiceInterface:
                                 "samples": list(samples)})
         return descriptors
 
-    def _emit_spec_keyword_intent(self, msg: Message, name: str,
-                                  intent_parser: object,
-                                  requires_context: Optional[List[ContextGate]] = None,
-                                  excludes_context: Optional[List[ContextGate]] = None):
+    def _spec_keyword_langs(self, name: str, intent_parser: object,
+                            warn: bool = False) -> Set[str]:
+        """The languages an ``ovos.intent.register.keyword`` registration of
+        this adapt intent goes out in: those where every vocabulary it names
+        has cached samples."""
         required_names = [r[0] for r in intent_parser.requires]
         optional_names = [o[0] for o in intent_parser.optional]
         one_of_groups = [list(g) for g in intent_parser.at_least_one]
@@ -589,15 +611,16 @@ class IntentServiceInterface:
                      set(excluded_names)
         for group in one_of_groups:
             referenced |= set(group)
+        carried: Set[str] = set()
         langs = {l for vt in referenced
                  for l in {l for (cvt, l) in self._adapt_keyword_samples
                           if cvt == vt or cvt == self._unmunge_vocab_name(vt)}}
         if not langs:
-            LOG.debug(f"no cached adapt vocab samples for intent {name}; "
-                      f"skipping {SpecMessage.INTENT_REGISTER_KEYWORD} emit")
-            return
+            if warn:
+                LOG.debug(f"no cached adapt vocab samples for intent {name}; "
+                          f"skipping {SpecMessage.INTENT_REGISTER_KEYWORD} emit")
+            return carried
 
-        intent_name = name.split(":")[-1] if name else name
         for lang in langs:
             # A vocabulary with no cached samples cannot be described in the
             # INTENT-4 payload. Dropping it from `required` / `optional` /
@@ -612,12 +635,27 @@ class IntentServiceInterface:
                 required_names + optional_names + excluded_names +
                 [n for group in one_of_groups for n in group], lang)
             if missing:
-                LOG.warning(
-                    f"not emitting {SpecMessage.INTENT_REGISTER_KEYWORD} for "
-                    f"intent {name} (lang={lang}): no vocabulary samples for "
-                    f"{sorted(missing)}; emitting would register the intent "
-                    f"without those constraints")
+                if warn:
+                    LOG.warning(
+                        f"not emitting {SpecMessage.INTENT_REGISTER_KEYWORD} for "
+                        f"intent {name} (lang={lang}): no vocabulary samples for "
+                        f"{sorted(missing)}; emitting would register the intent "
+                        f"without those constraints")
                 continue
+            carried.add(lang)
+        return carried
+
+    def _emit_spec_keyword_intent(self, msg: Message, name: str,
+                                  intent_parser: object,
+                                  requires_context: Optional[List[ContextGate]] = None,
+                                  excludes_context: Optional[List[ContextGate]] = None):
+        required_names = [r[0] for r in intent_parser.requires]
+        optional_names = [o[0] for o in intent_parser.optional]
+        one_of_groups = [list(g) for g in intent_parser.at_least_one]
+        excluded_names = list(intent_parser.excludes)
+
+        intent_name = name.split(":")[-1] if name else name
+        for lang in self._spec_keyword_langs(name, intent_parser, warn=True):
             payload = {
                 "skill_id": self.skill_id,
                 "intent_name": intent_name,
@@ -663,9 +701,11 @@ class IntentServiceInterface:
                 break
         if slot is not None and self.registered_intents[slot] == (name, intent_parser):
             return
-        self._adapt.emit_legacy_register_intent(msg, intent_parser,
-                                                 requires_context=requires_context,
-                                                 excludes_context=excludes_context)
+        self._adapt.emit_legacy_register_intent(
+            msg, intent_parser,
+            requires_context=requires_context,
+            excludes_context=excludes_context,
+            carried_langs=self._spec_keyword_langs(name, intent_parser))
         self._emit_spec_keyword_intent(msg, name, intent_parser,
                                        requires_context=requires_context,
                                        excludes_context=excludes_context)
