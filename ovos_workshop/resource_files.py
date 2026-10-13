@@ -801,6 +801,9 @@ class SkillResources:
         self.types = self._define_resource_types()
         self._dialog_renderer = dialog_renderer
         self.static = dict()
+        # (directories, file signature, vocabularies, last check) of the last
+        # _locale_vocabularies() call, see there
+        self._vocabularies_memo: Optional[tuple] = None
 
     @property
     def dialog_renderer(self) -> MustacheDialogRenderer:
@@ -940,7 +943,7 @@ class SkillResources:
         vocab_type = self.types.vocabulary
         cacheable = not vocab_type.user_directory
         if cacheable:
-            memo = getattr(self, "_vocabularies_memo", None)
+            memo = self._vocabularies_memo
             if memo is not None and memo[0] == (vocab_type.base_directory,
                                                 vocab_type.workshop_directory) \
                     and _still_fresh(memo[1], memo[3]):
