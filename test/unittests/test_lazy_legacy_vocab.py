@@ -56,5 +56,19 @@ class TestLazyLegacyVocab(unittest.TestCase):
                                 for v in self._topics("register_vocab")),
                          [("crimson", "en-US"), ("red", "en-US"), ("rouge", "fr-FR")])
 
+    def test_a_large_vocabulary_registers_in_linear_time(self):
+        import time
+        start = time.monotonic()
+        for n in range(20000):
+            self.iface.register_keyword(self.sid + "City", f"city{n}", [f"town{n}"], "en-US")
+        self.assertLess(time.monotonic() - start, 5)
+        samples = self.iface._get_keyword_samples(self.sid + "City", "en-US")
+        self.assertEqual(len(samples), 40000)
+        self.assertEqual(samples[:3], ["city0", "town0", "city1"])
+        # a repeat adds nothing
+        self.iface.register_keyword(self.sid + "City", "city0", ["town0"], "en-US")
+        self.assertEqual(len(self.iface._get_keyword_samples(self.sid + "City", "en-US")), 40000)
+
+
 if __name__ == "__main__":
     unittest.main()

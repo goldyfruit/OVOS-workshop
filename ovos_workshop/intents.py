@@ -499,6 +499,9 @@ class IntentServiceInterface:
         self.detached_intents: List[tuple] = []
         self._iterator_lock = RLock()
         self._adapt_keyword_samples: dict = {}
+        # the same keys, as sets: membership for the dedupe below (a list
+        # scan made registering a vocabulary quadratic in its size)
+        self._adapt_keyword_seen: dict = {}
         self._adapt = _AdaptIntentApi(self)
         self._padatious = _PadatiousIntentApi(self)
 
@@ -542,8 +545,10 @@ class IntentServiceInterface:
         aliases = aliases or []
 
         samples = self._adapt_keyword_samples.setdefault((vocab_type, lang), [])
+        seen = self._adapt_keyword_seen.setdefault((vocab_type, lang), set())
         for value in [entity, *aliases]:
-            if value and value not in samples:
+            if value and value not in seen:
+                seen.add(value)
                 samples.append(value)
 
         # TODO: drop once _AdaptIntentApi.emit_legacy_register_vocab is removed.
