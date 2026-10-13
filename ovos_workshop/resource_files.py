@@ -184,7 +184,8 @@ def _tree_still_matches(signature) -> bool:
 #: every .voc the cached result was built from: about a quarter of a skill's
 #: load time on a hub serving 11 languages, more where the package lives on a
 #: network volume. A file added to an installed package is still seen, at most
-#: this many seconds later.
+#: this many seconds later. A file deleted or renamed in that window is still
+#: returned until then, so a read of it fails with FileNotFoundError.
 _REVALIDATE_AFTER_S = 2.0
 
 
