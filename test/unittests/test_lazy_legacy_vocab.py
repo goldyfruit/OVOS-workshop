@@ -22,7 +22,7 @@ class TestLazyLegacyVocab(unittest.TestCase):
         self.iface.register_keyword(self.sid + "Colour", "red", ["crimson"], "en-US")
         self.assertEqual(self._topics("register_vocab"), [])
         # the samples are still known to the spec registration path
-        self.assertEqual(self.iface._get_keyword_samples(self.sid + "Colour", "en-US"),
+        self.assertEqual(list(self.iface._get_keyword_samples(self.sid + "Colour", "en-US")),
                          ["red", "crimson"])
 
     def test_adapt_intent_flushes_its_vocab_before_the_intent(self):
@@ -55,6 +55,20 @@ class TestLazyLegacyVocab(unittest.TestCase):
         self.assertEqual(sorted((v["data"]["entity_value"], v["data"]["lang"])
                                 for v in self._topics("register_vocab")),
                          [("crimson", "en-US"), ("red", "en-US"), ("rouge", "fr-FR")])
+
+    def test_a_large_vocabulary_registers_in_linear_time(self):
+        import time
+        start = time.monotonic()
+        for n in range(20000):
+            self.iface.register_keyword(self.sid + "City", f"city{n}", [f"town{n}"], "en-US")
+        self.assertLess(time.monotonic() - start, 5)
+        samples = self.iface._get_keyword_samples(self.sid + "City", "en-US")
+        self.assertEqual(len(samples), 40000)
+        self.assertEqual(list(samples)[:3], ["city0", "town0", "city1"])
+        # a repeat adds nothing
+        self.iface.register_keyword(self.sid + "City", "city0", ["town0"], "en-US")
+        self.assertEqual(len(self.iface._get_keyword_samples(self.sid + "City", "en-US")), 40000)
+
 
 if __name__ == "__main__":
     unittest.main()

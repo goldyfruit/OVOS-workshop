@@ -498,7 +498,9 @@ class IntentServiceInterface:
         self.registered_intents: List[tuple] = []
         self.detached_intents: List[tuple] = []
         self._iterator_lock = RLock()
-        self._adapt_keyword_samples: dict = {}
+        # (vocab_type, lang) -> samples, a dict used as an ordered set:
+        # membership is O(1) and the payload keeps registration order
+        self._adapt_keyword_samples: Dict[tuple, Dict[str, None]] = {}
         self._adapt = _AdaptIntentApi(self)
         self._padatious = _PadatiousIntentApi(self)
 
@@ -541,10 +543,10 @@ class IntentServiceInterface:
         msg.context["skill_id"] = self.skill_id
         aliases = aliases or []
 
-        samples = self._adapt_keyword_samples.setdefault((vocab_type, lang), [])
+        samples = self._adapt_keyword_samples.setdefault((vocab_type, lang), {})
         for value in [entity, *aliases]:
-            if value and value not in samples:
-                samples.append(value)
+            if value:
+                samples[value] = None
 
         # TODO: drop once _AdaptIntentApi.emit_legacy_register_vocab is removed.
         self._adapt.emit_legacy_register_vocab(msg, vocab_type, entity,
@@ -557,7 +559,7 @@ class IntentServiceInterface:
         return vocab_type
 
     def _get_keyword_samples(self, vocab_type: str, lang: str
-                             ) -> Optional[List[str]]:
+                             ) -> Optional[Dict[str, None]]:
         """Look up cached samples for a (possibly munged) vocab type."""
         samples = self._adapt_keyword_samples.get((vocab_type, lang))
         if samples is None:
