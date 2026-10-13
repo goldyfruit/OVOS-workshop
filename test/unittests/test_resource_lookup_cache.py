@@ -16,6 +16,13 @@ def _touch(path: Path, text: str = "x\n"):
     path.write_text(text)
 
 
+def _bump_mtime(directory: Path):
+    """Move a directory's mtime a second forward, so a change is seen even
+    on a filesystem whose timestamps are too coarse to tell two writes apart."""
+    st = directory.stat()
+    os.utime(directory, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+
+
 class TestResourceLookupCache(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -136,8 +143,8 @@ class TestCachesSeeChangesDeepInTheTree(unittest.TestCase):
 
     def test_vocabulary_added_in_a_subdirectory_is_seen(self):
         self.assertNotIn("size", self.resources._locale_vocabularies())
-        time.sleep(0.01)
         _touch(self.skill / "locale" / "en-US" / "vocab" / "size.voc", "big\n")
+        _bump_mtime(self.skill / "locale" / "en-US" / "vocab")
         self.assertEqual(self.resources._locale_vocabularies()["size"], ["big"])
 
     def test_vocabulary_edited_in_place_is_reread(self):
@@ -185,8 +192,8 @@ class TestRevalidationWindow(unittest.TestCase):
 
     def test_change_seen_once_the_window_has_passed(self):
         self.assertNotIn("size", self.resources._locale_vocabularies())
-        time.sleep(0.01)
         _touch(self.skill / "locale" / "en-US" / "vocab" / "size.voc", "big\n")
+        _bump_mtime(self.skill / "locale" / "en-US" / "vocab")
         self.now[0] += resource_files._REVALIDATE_AFTER_S + 0.1
         self.assertEqual(self.resources._locale_vocabularies()["size"], ["big"])
         rt = ResourceType("intent", ".intent", "en-US")
